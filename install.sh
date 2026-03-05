@@ -217,7 +217,82 @@ check_docker_compose() {
   fi
 }
 
+check_repo_access() {
+  local api_url="https://api.github.com/repos/$GITHUB_REPO"
+  local http_code
+  
+  if [ -n "$GITHUB_TOKEN" ]; then
+    http_code=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: token $GITHUB_TOKEN" "$api_url")
+  else
+    http_code=$(curl -s -o /dev/null -w "%{http_code}" "$api_url")
+  fi
+  
+  echo "$http_code"
+}
+
+prompt_github_token() {
+  echo ""
+  echo -e "${YELLOW}════════════════════════════════════════════════════════════════════════════${RESET}"
+  echo -e "${YELLOW}  Repository requires authentication (private repository)${RESET}"
+  echo -e "${YELLOW}════════════════════════════════════════════════════════════════════════════${RESET}"
+  echo ""
+  echo -e "${CYAN}To access a private repository, you need a GitHub Personal Access Token.${RESET}"
+  echo ""
+  echo -e "${GREEN}How to create a token:${RESET}"
+  echo "  1. Go to: https://github.com/settings/tokens"
+  echo "  2. Click 'Generate new token (classic)' or 'Fine-grained token'"
+  echo "  3. For classic token: select 'repo' scope"
+  echo "     For fine-grained: select the repository and 'Contents: Read'"
+  echo "  4. Copy the generated token"
+  echo ""
+  echo -e "${CYAN}Enter your GitHub token (input hidden):${RESET}"
+  read -rs USER_TOKEN
+  echo ""
+  
+  if [ -z "$USER_TOKEN" ]; then
+    error "No token provided"
+    exit 1
+  fi
+  
+  GITHUB_TOKEN="$USER_TOKEN"
+  GIT_URL="https://x-access-token:${GITHUB_TOKEN}@github.com/$GITHUB_REPO.git"
+  
+  local verify_code=$(check_repo_access)
+  if [ "$verify_code" != "200" ]; then
+    error "Token verification failed (HTTP $verify_code)"
+    echo ""
+    echo -e "${YELLOW}Please check:${RESET}"
+    echo "  • Token is correct and not expired"
+    echo "  • Token has access to repository: $GITHUB_REPO"
+    echo "  • Repository name is correct"
+    exit 1
+  fi
+  
+  success "Token verified successfully"
+}
+
 download_setup() {
+  info "Checking repository access..."
+  
+  local access_code=$(check_repo_access)
+  
+  if [ "$access_code" = "404" ] || [ "$access_code" = "403" ] || [ "$access_code" = "401" ]; then
+    if [ -z "$GITHUB_TOKEN" ]; then
+      warn "Repository not accessible (HTTP $access_code)"
+      prompt_github_token
+    else
+      error "Access denied with provided token (HTTP $access_code)"
+      echo ""
+      echo -e "${YELLOW}Please check:${RESET}"
+      echo "  • Token has 'repo' scope (classic) or 'Contents: Read' (fine-grained)"
+      echo "  • Token is not expired"
+      echo "  • Repository name is correct: $GITHUB_REPO"
+      exit 1
+    fi
+  elif [ "$access_code" != "200" ]; then
+    warn "Unexpected response (HTTP $access_code), attempting download anyway..."
+  fi
+  
   info "Downloading V2RayTun Setup scripts..."
   
   rm -rf "$SETUP_DIR"
@@ -225,6 +300,8 @@ download_setup() {
   cd "$SETUP_DIR"
   
   local DOWNLOAD_SUCCESS=false
+  
+  export GIT_TERMINAL_PROMPT=0
   
   git init -q 2>/dev/null || true
   git remote add origin "$GIT_URL" 2>/dev/null || true
@@ -284,12 +361,12 @@ download_setup() {
     error "Failed to download setup scripts"
     echo ""
     echo -e "${YELLOW}Possible reasons:${RESET}"
-    echo "  • Repository is private (provide GITHUB_TOKEN)"
     echo "  • Network connection issues"
     echo "  • Repository or branch doesn't exist"
+    echo "  • Token doesn't have required permissions"
     echo ""
-    echo -e "${CYAN}Try with token:${RESET}"
-    echo "  GITHUB_TOKEN=your_token bash <(curl -fsSL ...)"
+    echo -e "${CYAN}Repository: ${RESET}$GITHUB_REPO"
+    echo -e "${CYAN}Branch:     ${RESET}$GITHUB_BRANCH"
     echo ""
     exit 1
   fi
