@@ -376,6 +376,97 @@ download_setup() {
   chmod +x scripts/setup/common/*.sh 2>/dev/null || true
 }
 
+create_global_command() {
+  cat > /usr/local/bin/v2raytunsetup << 'CMDEOF'
+#!/bin/bash
+SETUP_SCRIPT="/opt/v2raytunpanel-setup/scripts/setup/v2raytunsetup.sh"
+TMUX_SESSION="v2raytunpanel-setup"
+
+show_help() {
+  echo "V2RayTun Panel Setup Manager"
+  echo ""
+  echo "Usage: v2raytunsetup [command]"
+  echo ""
+  echo "Commands:"
+  echo "  (no args)   Launch setup menu"
+  echo "  resume      Resume interrupted installation"
+  echo "  attach      Attach to running tmux session"
+  echo "  status      Show installation status"
+  echo "  logs        Show panel logs"
+  echo "  help        Show this help"
+  echo ""
+}
+
+case "${1:-}" in
+  resume)
+    if [ -f "/opt/v2raytunpanel/docker/.install_state" ]; then
+      echo "Resuming installation..."
+      cd /opt/v2raytunpanel/docker && docker compose up -d
+      echo ""
+      echo "Services starting. Check status with: v2raytunsetup status"
+    else
+      echo "No interrupted installation found."
+      echo "Run 'v2raytunsetup' to start new installation."
+    fi
+    ;;
+  attach)
+    if tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
+      exec tmux attach-session -t "$TMUX_SESSION"
+    else
+      echo "No active installation session found."
+      echo "Run 'v2raytunsetup' to start new installation."
+    fi
+    ;;
+  status)
+    echo "=== V2RayTun Panel Status ==="
+    echo ""
+    if [ -f "/opt/v2raytunpanel/docker/docker-compose.yml" ]; then
+      cd /opt/v2raytunpanel/docker && docker compose ps
+    else
+      echo "Panel not installed."
+    fi
+    ;;
+  logs)
+    if [ -f "/opt/v2raytunpanel/docker/docker-compose.yml" ]; then
+      cd /opt/v2raytunpanel/docker && docker compose logs -f --tail=100 ${2:-}
+    else
+      echo "Panel not installed."
+    fi
+    ;;
+  help|--help|-h)
+    show_help
+    ;;
+  *)
+    if [ -f "$SETUP_SCRIPT" ]; then
+      exec bash "$SETUP_SCRIPT"
+    else
+      echo "Setup scripts not found. Please reinstall:"
+      echo "  GITHUB_TOKEN=your_token bash <(curl -fsSL https://raw.githubusercontent.com/PonomarevAleksandr/V2RayTunPanelSetup/main/install.sh)"
+    fi
+    ;;
+esac
+CMDEOF
+  chmod +x /usr/local/bin/v2raytunsetup
+  success "Command 'v2raytunsetup' installed globally"
+}
+
+show_disconnect_warning() {
+  echo ""
+  echo -e "${YELLOW}════════════════════════════════════════════════════════════════════════════${RESET}"
+  echo -e "${BOLD_CYAN}  Important: Connection Recovery${RESET}"
+  echo -e "${YELLOW}════════════════════════════════════════════════════════════════════════════${RESET}"
+  echo ""
+  echo -e "  If your SSH connection drops during installation, you can return:"
+  echo ""
+  echo -e "  ${GREEN}v2raytunsetup attach${RESET}   — attach to running installation session"
+  echo -e "  ${GREEN}v2raytunsetup resume${RESET}   — resume interrupted installation"
+  echo -e "  ${GREEN}v2raytunsetup${RESET}          — open setup menu"
+  echo ""
+  echo -e "${YELLOW}════════════════════════════════════════════════════════════════════════════${RESET}"
+  echo ""
+  sleep 3
+}
+
 main() {
   print_banner
   
@@ -412,10 +503,12 @@ main() {
   check_docker_compose
   
   download_setup
+  create_global_command
   
   echo ""
   success "Setup ready! Launching installer..."
-  echo ""
+  
+  show_disconnect_warning
   
   exec bash "$SETUP_DIR/scripts/setup/v2raytunsetup.sh"
 }
