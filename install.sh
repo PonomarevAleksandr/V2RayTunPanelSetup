@@ -46,7 +46,7 @@ error()   { echo -e "${RED}[ERROR]${RESET} $1" >&2; }
 success() { echo -e "${GREEN}[OK]${RESET} $1"; }
 
 print_banner() {
-  clear
+  clear 2>/dev/null || true
   echo ""
   echo -e "${MAGENTA}═══════════════════════════════════════════════════════════════════════════${RESET}"
   echo ""
