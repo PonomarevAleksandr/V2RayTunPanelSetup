@@ -238,6 +238,13 @@ main() {
   fetch_assets
   install_global_command
 
+  # Headless / non-interactive run (no TTY, e.g. CI or `ssh host bash <(...)`):
+  # skip the tmux wrapper and let v2raytunsetup.sh's V2RAYTUN_ACTION flow exit
+  # cleanly after the requested action.
+  if [ ! -t 0 ] || [ ! -t 1 ]; then
+    exec bash "$SETUP_DIR/lib/v2raytunsetup.sh"
+  fi
+
   if [ "${1:-}" != "--no-tmux" ]; then
     ensure_tmux_session
   fi
