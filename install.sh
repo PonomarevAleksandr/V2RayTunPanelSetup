@@ -8,9 +8,7 @@
 #
 # Optional environment overrides (no prompt):
 #   V2RAYTUN_REGISTRY        Docker registry hostname (default docker-registry.v2raytun.com)
-#   V2RAYTUN_REGISTRY_USER   Registry username (skips prompt)
-#   V2RAYTUN_REGISTRY_PASS   Registry password (skips prompt)
-#   V2RAYTUN_VERSION         Image tag to pull (default 1.0.0)
+#   V2RAYTUN_VERSION         Image tag to pull (default 1.0.10)
 #   V2RAYTUN_ACTION          Direct action: install-panel | install-node | update-panel | update-node
 #   V2RAYTUN_PANEL_DOMAIN    Pre-fill panel domain (skips prompt)
 #   V2RAYTUN_SUB_DOMAIN      Pre-fill subscription domain (defaults to panel domain)
@@ -21,9 +19,9 @@
 
 set -e
 
-INSTALLER_VERSION="1.0.0"
+INSTALLER_VERSION="1.0.10"
 DEFAULT_REGISTRY="docker-registry.v2raytun.com"
-DEFAULT_VERSION="1.0.0"
+DEFAULT_VERSION="1.0.10"
 
 REPO="${V2RAYTUNSETUP_REPO:-PonomarevAleksandr/V2RayTunPanelSetup}"
 BRANCH="${V2RAYTUNSETUP_BRANCH:-main}"
@@ -221,8 +219,6 @@ ensure_tmux_session() {
   exec tmux new-session -s "$TMUX_SESSION" \
     "V2RAYTUN_REGISTRY=${V2RAYTUN_REGISTRY:-$DEFAULT_REGISTRY} \
      V2RAYTUN_VERSION=${V2RAYTUN_VERSION:-$DEFAULT_VERSION} \
-     V2RAYTUN_REGISTRY_USER='${V2RAYTUN_REGISTRY_USER:-}' \
-     V2RAYTUN_REGISTRY_PASS='${V2RAYTUN_REGISTRY_PASS:-}' \
      V2RAYTUN_PANEL_DOMAIN='${V2RAYTUN_PANEL_DOMAIN:-}' \
      V2RAYTUN_SUB_DOMAIN='${V2RAYTUN_SUB_DOMAIN:-}' \
      V2RAYTUN_ACTION='${V2RAYTUN_ACTION:-}' \

@@ -3,7 +3,7 @@
 # V2RayTun Panel — Setup Manager (interactive)
 #
 # Sourced by /usr/local/bin/v2raytunsetup and by the bootstrap install.sh.
-# Pulls images from a private Docker registry — no source clone needed.
+# Pulls images from the public Docker registry — no auth or source clone needed.
 # ═════════════════════════════════════════════════════════════════════════════
 
 set -e
@@ -16,8 +16,8 @@ SETUP_DIR="$(dirname "$SCRIPT_DIR")"
 [ -f "$SETUP_DIR/.config" ] && . "$SETUP_DIR/.config"
 
 REGISTRY="${V2RAYTUN_REGISTRY:-docker-registry.v2raytun.com}"
-VERSION="${V2RAYTUN_VERSION:-1.0.0}"
-INSTALLER_VERSION="${INSTALLER_VERSION:-1.0.0}"
+VERSION="${V2RAYTUN_VERSION:-1.0.10}"
+INSTALLER_VERSION="${INSTALLER_VERSION:-1.0.10}"
 
 PANEL_DIR="/opt/v2raytunpanel"
 PANEL_DOCKER_DIR="$PANEL_DIR/docker"
@@ -62,59 +62,17 @@ press_any_key() {
 }
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Registry authentication
+# Registry: public, no authentication required
 # ──────────────────────────────────────────────────────────────────────────────
-registry_login() {
-  local user="${1:-${V2RAYTUN_REGISTRY_USER:-}}"
-  local pass="${2:-${V2RAYTUN_REGISTRY_PASS:-}}"
-  local interactive="${3:-1}"
-
-  if [ -z "$user" ] || [ -z "$pass" ]; then
-    if [ "$interactive" != "1" ]; then
-      error "Registry credentials are not provided"
-      return 1
-    fi
-
-    echo ""
-    echo -e "${BOLD_CYAN}Docker Registry credentials${RESET}"
-    echo -e "${DIM}Provided by the team lead. Each beta tester gets a personal pair.${RESET}"
-    echo ""
-    if [ -z "$user" ]; then
-      read -rp "Username: " user
-    fi
-    if [ -z "$pass" ]; then
-      pass="$(read_password 'Password: ')"
-    fi
-  fi
-
-  if [ -z "$user" ] || [ -z "$pass" ]; then
-    error "Registry username and password are required"
-    return 1
-  fi
-
-  info "Logging in to ${REGISTRY}..."
-  if echo "$pass" | docker login "$REGISTRY" -u "$user" --password-stdin >/dev/null 2>&1; then
-    success "Authenticated with ${REGISTRY} as '${user}'"
-  else
-    error "Login failed. Check credentials and try again."
-    return 1
-  fi
-
-  info "Verifying pull access..."
+verify_registry_access() {
+  info "Verifying registry access..."
   if docker pull "$PANEL_IMAGE" >/dev/null 2>&1; then
-    success "Pull access verified (${PANEL_IMAGE})"
-  else
-    error "Pull access denied. Your account may lack permission for this image."
-    return 1
-  fi
-  return 0
-}
-
-registry_login_if_needed() {
-  if docker pull "$PANEL_IMAGE" >/dev/null 2>&1; then
+    success "Registry accessible (${REGISTRY})"
     return 0
+  else
+    error "Cannot pull from ${REGISTRY}. Check your network connectivity."
+    return 1
   fi
-  registry_login
 }
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -159,7 +117,7 @@ panel_install() {
     sub_domain="${sub_domain:-$panel_domain}"
   fi
 
-  if ! registry_login_if_needed; then
+  if ! verify_registry_access; then
     error "Cannot continue without registry access"
     return 1
   fi
@@ -271,7 +229,6 @@ panel_update() {
     return 1
   fi
   check_docker
-  registry_login_if_needed || return 1
 
   cd "$PANEL_DOCKER_DIR"
 
@@ -421,11 +378,6 @@ node_install() {
   read -rp "Choice (1/2, default 1): " METHOD
   METHOD="${METHOD:-1}"
 
-  if ! registry_login_if_needed; then
-    error "Cannot continue without registry access"
-    return 1
-  fi
-
   case "$METHOD" in
     2) node_install_interactive ;;
     *) node_install_from_panel ;;
@@ -527,7 +479,6 @@ node_update() {
     return 1
   fi
   check_docker
-  registry_login_if_needed || return 1
 
   cd "$NODE_DIR"
   info "Pulling latest image..."
@@ -658,9 +609,8 @@ menu_main() {
     echo -e "  ${BLUE}4)${RESET} Update Node"
     echo -e "  ${BLUE}5)${RESET} Backup database"
     echo -e "  ${BLUE}6)${RESET} Restore from backup"
-    echo -e "  ${BLUE}7)${RESET} Re-login to Docker registry"
-    echo -e "  ${BLUE}8)${RESET} Show status"
-    echo -e "  ${BLUE}9)${RESET} Tail backend logs"
+    echo -e "  ${BLUE}7)${RESET} Show status"
+    echo -e "  ${BLUE}8)${RESET} Tail backend logs"
     echo -e "  ${BLUE}d)${RESET} Remove Panel  ${DIM}(destructive)${RESET}"
     echo -e "  ${BLUE}D)${RESET} Remove Node   ${DIM}(destructive)${RESET}"
     echo -e "  ${RED}0)${RESET} Exit"
@@ -673,9 +623,8 @@ menu_main() {
       4) node_update; press_any_key ;;
       5) backup_create; press_any_key ;;
       6) backup_restore; press_any_key ;;
-      7) registry_login; press_any_key ;;
-      8) panel_status; press_any_key ;;
-      9) panel_logs ;;
+      7) panel_status; press_any_key ;;
+      8) panel_logs ;;
       d) panel_remove; press_any_key ;;
       D) node_remove; press_any_key ;;
       0) info "Goodbye!"; exit 0 ;;
@@ -699,7 +648,6 @@ Commands:
   update node      Update node image and restart
   status           Show running containers
   logs [service]   Tail container logs (default: backend)
-  login            Re-authenticate with Docker registry
   backup           Create database + redis backup
   restore          Restore database from backup
   attach           Attach to running tmux setup session
@@ -708,9 +656,7 @@ Commands:
 
 Environment:
   V2RAYTUN_REGISTRY        Docker registry hostname
-  V2RAYTUN_REGISTRY_USER   Username (skips prompt)
-  V2RAYTUN_REGISTRY_PASS   Password (skips prompt)
-  V2RAYTUN_VERSION         Image tag (default 1.0.0)
+  V2RAYTUN_VERSION         Image tag (default 1.0.10)
 HELP
 }
 
@@ -738,7 +684,6 @@ main() {
       ;;
     status)         panel_status ;;
     logs)           panel_logs "${2:-backend}" ;;
-    login)          registry_login ;;
     update)
       case "${2:-panel}" in
         panel) panel_update ;;
