@@ -448,19 +448,56 @@ node_install_from_panel() {
   echo -e "${CYAN}1.${RESET} Open Panel → Nodes → Create Node"
   echo -e "${CYAN}2.${RESET} Fill in Name, Address (this server's IP), Port"
   echo -e "${CYAN}3.${RESET} Click Create, then Copy the docker-compose snippet"
-  echo -e "${CYAN}4.${RESET} Paste it below, then press Ctrl+D when done"
   echo ""
 
   mkdir -p "$NODE_DIR"
   cd "$NODE_DIR"
 
-  echo -e "${YELLOW}Paste docker-compose content (Ctrl+D to finish):${RESET}"
-  cat > docker-compose.yml
+  if [ -n "${V2RAYTUN_DOCKER_COMPOSE:-}" ]; then
+    echo "$V2RAYTUN_DOCKER_COMPOSE" > docker-compose.yml
+    info "Using docker-compose from V2RAYTUN_DOCKER_COMPOSE env"
+  elif [ -f /tmp/v2raytun-compose.yml ]; then
+    cp /tmp/v2raytun-compose.yml docker-compose.yml
+    rm -f /tmp/v2raytun-compose.yml
+    info "Using docker-compose from /tmp/v2raytun-compose.yml"
+  else
+    echo -e "${CYAN}4.${RESET} Paste it below, then press Ctrl+D when done"
+    echo ""
+    echo -e "${YELLOW}Paste docker-compose content (Ctrl+D to finish):${RESET}"
+    cat > docker-compose.yml
+  fi
 
   if [ ! -s docker-compose.yml ]; then
     error "Empty input"
     rm -f docker-compose.yml
     return 1
+  fi
+
+  # Validate SECRET_KEY is not truncated
+  local sk
+  sk=$(grep -oP 'SECRET_KEY=\K\S+' docker-compose.yml 2>/dev/null || true)
+  if [ -n "$sk" ]; then
+    if ! echo "$sk" | base64 -d 2>/dev/null | python3 -c "import sys,json; json.load(sys.stdin)" 2>/dev/null; then
+      if ! echo "$sk" | base64 -d 2>/dev/null | python3 -c "import sys,json; json.load(sys.stdin)" 2>/dev/null; then
+        warn ""
+        warn "SECRET_KEY appears to be truncated or corrupted!"
+        warn "This usually happens when pasting long text in a terminal."
+        warn ""
+        warn "Alternative methods:"
+        warn "  1. Save docker-compose to /tmp/v2raytun-compose.yml BEFORE running this script:"
+        warn "     scp compose.yml root@this-server:/tmp/v2raytun-compose.yml"
+        warn ""
+        warn "  2. Or download directly from panel API:"
+        warn "     curl -sk 'https://PANEL/api/nodes/NODE_UUID/docker-compose' \\"
+        warn "       -H 'Authorization: Bearer TOKEN' | python3 -c \\"
+        warn "       \"import sys,json; print(json.load(sys.stdin)['data']['dockerCompose'])\" \\"
+        warn "       > $NODE_DIR/docker-compose.yml"
+        warn ""
+        error "Cannot start node with invalid SECRET_KEY. Fix the docker-compose.yml and re-run."
+        return 1
+      fi
+    fi
+    success "SECRET_KEY validated OK"
   fi
 
   if grep -qi 'awg\|amneziawg\|wireguard' docker-compose.yml 2>/dev/null; then
