@@ -505,6 +505,13 @@ node_install_from_panel() {
     ensure_awg_kernel_module || warn "Continuing without AWG kernel module..."
   fi
 
+  # Enable IP forwarding on host (required for VPN, cannot use sysctls with host network mode)
+  if [ "$(sysctl -n net.ipv4.ip_forward 2>/dev/null)" != "1" ]; then
+    sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
+    grep -q 'net.ipv4.ip_forward' /etc/sysctl.conf 2>/dev/null || echo 'net.ipv4.ip_forward=1' >> /etc/sysctl.conf
+    info "Enabled net.ipv4.ip_forward"
+  fi
+
   info "Pulling node image..."
   docker compose pull
 
@@ -553,6 +560,13 @@ EOF
   chmod 600 .env
 
   cp "$SETUP_DIR/compose/docker-compose.node.yml" docker-compose.yml
+
+  # Enable IP forwarding on host (required for VPN, cannot use sysctls with host network mode)
+  if [ "$(sysctl -n net.ipv4.ip_forward 2>/dev/null)" != "1" ]; then
+    sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
+    grep -q 'net.ipv4.ip_forward' /etc/sysctl.conf 2>/dev/null || echo 'net.ipv4.ip_forward=1' >> /etc/sysctl.conf
+    info "Enabled net.ipv4.ip_forward"
+  fi
 
   info "Pulling node image..."
   docker compose pull
