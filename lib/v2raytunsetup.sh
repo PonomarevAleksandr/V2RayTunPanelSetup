@@ -338,7 +338,15 @@ ${panel_domain} {
 }
 
 ${sub_domain} {
-    reverse_proxy localhost:3000
+    handle /sub/* {
+        reverse_proxy localhost:8080
+    }
+    handle /sub {
+        redir /sub/ permanent
+    }
+    handle {
+        reverse_proxy localhost:3000
+    }
 }
 EOF
   fi
@@ -425,22 +433,11 @@ ensure_awg_kernel_module() {
 
 node_install() {
   print_banner
-  echo -e "${BOLD_MAGENTA}  Install Node${RESET}"
+  echo -e "${BOLD_MAGENTA}  Install Node / Установка ноды${RESET}"
   echo -e "${MAGENTA}════════════════════════════════════════════════════════════════════${RESET}"
   echo ""
   check_docker
-
-  echo -e "${CYAN}Two ways to install a node:${RESET}"
-  echo -e "  ${GREEN}1)${RESET} ${BOLD}Paste docker-compose from the panel${RESET} (recommended, includes mTLS certificates)"
-  echo -e "  ${GREEN}2)${RESET} Interactive (manual: panel URL + node UUID + ports)"
-  echo ""
-  read -rp "Choice (1/2, default 1): " METHOD
-  METHOD="${METHOD:-1}"
-
-  case "$METHOD" in
-    2) node_install_interactive ;;
-    *) node_install_from_panel ;;
-  esac
+  node_install_from_panel
 }
 
 node_install_from_panel() {
@@ -461,43 +458,48 @@ node_install_from_panel() {
     rm -f /tmp/v2raytun-compose.yml
     info "Using docker-compose from /tmp/v2raytun-compose.yml"
   else
-    echo -e "${CYAN}4.${RESET} Paste it below, then press Ctrl+D when done"
+    echo -e "${CYAN}1.${RESET} Откройте панель → Ноды → Создать ноду"
+    echo -e "    Open Panel → Nodes → Create Node"
+    echo -e "${CYAN}2.${RESET} Укажите имя, IP этого сервера и порт"
+    echo -e "    Fill in Name, Address (this server IP), Port"
+    echo -e "${CYAN}3.${RESET} Скопируйте docker-compose из панели"
+    echo -e "    Copy the docker-compose from the panel"
+    echo -e "${CYAN}4.${RESET} Вставьте ниже, затем нажмите Ctrl+D"
+    echo -e "    Paste below, then press Ctrl+D when done"
     echo ""
-    echo -e "${YELLOW}Paste docker-compose content (Ctrl+D to finish):${RESET}"
+    echo -e "${YELLOW}Docker-compose (Ctrl+D):${RESET}"
     cat > docker-compose.yml
   fi
 
   if [ ! -s docker-compose.yml ]; then
-    error "Empty input"
+    error "Empty input / Пустой ввод"
     rm -f docker-compose.yml
     return 1
   fi
 
-  # Validate SECRET_KEY is not truncated
+  # Validate SECRET_KEY is not truncated (no python3 dependency)
   local sk
-  sk=$(grep -oP 'SECRET_KEY=\K\S+' docker-compose.yml 2>/dev/null || true)
+  sk=$(sed -n 's/.*SECRET_KEY=\([^ ]*\).*/\1/p' docker-compose.yml 2>/dev/null | head -1)
   if [ -n "$sk" ]; then
-    if ! echo "$sk" | base64 -d 2>/dev/null | python3 -c "import sys,json; json.load(sys.stdin)" 2>/dev/null; then
-      if ! echo "$sk" | base64 -d 2>/dev/null | python3 -c "import sys,json; json.load(sys.stdin)" 2>/dev/null; then
+    local decoded
+    decoded=$(echo "$sk" | base64 -d 2>/dev/null) || decoded=""
+    if [ -z "$decoded" ] || ! echo "$decoded" | grep -q '"version"'; then
+      # Try gzip decode
+      decoded=$(echo "$sk" | base64 -d 2>/dev/null | gzip -d 2>/dev/null) || decoded=""
+      if [ -z "$decoded" ] || ! echo "$decoded" | grep -q '"version"'; then
         warn ""
-        warn "SECRET_KEY appears to be truncated or corrupted!"
-        warn "This usually happens when pasting long text in a terminal."
+        warn "SECRET_KEY обрезан или повреждён! / SECRET_KEY truncated or corrupted!"
+        warn "Это случается при вставке длинного текста в терминал."
         warn ""
-        warn "Alternative methods:"
-        warn "  1. Save docker-compose to /tmp/v2raytun-compose.yml BEFORE running this script:"
-        warn "     scp compose.yml root@this-server:/tmp/v2raytun-compose.yml"
+        warn "Альтернативные способы / Alternative methods:"
+        warn "  Сохраните файл перед запуском скрипта / Save file before running:"
+        warn "  scp compose.yml root@this-server:/tmp/v2raytun-compose.yml"
         warn ""
-        warn "  2. Or download directly from panel API:"
-        warn "     curl -sk 'https://PANEL/api/nodes/NODE_UUID/docker-compose' \\"
-        warn "       -H 'Authorization: Bearer TOKEN' | python3 -c \\"
-        warn "       \"import sys,json; print(json.load(sys.stdin)['data']['dockerCompose'])\" \\"
-        warn "       > $NODE_DIR/docker-compose.yml"
-        warn ""
-        error "Cannot start node with invalid SECRET_KEY. Fix the docker-compose.yml and re-run."
+        error "SECRET_KEY невалиден. Исправьте docker-compose.yml и запустите снова."
         return 1
       fi
     fi
-    success "SECRET_KEY validated OK"
+    success "SECRET_KEY OK"
   fi
 
   if grep -qi 'awg\|amneziawg\|wireguard' docker-compose.yml 2>/dev/null; then
@@ -639,23 +641,33 @@ backup_create() {
   fi
 
   mkdir -p "$BACKUP_DIR"
+
+  local avail_mb
+  avail_mb=$(df -m "$BACKUP_DIR" | awk 'NR==2{print $4}')
+  if [ "${avail_mb:-0}" -lt 200 ]; then
+    error "Less than 200 MB free on backup disk — aborting"
+    return 1
+  fi
+
   local ts
   ts=$(date +%Y%m%d_%H%M%S)
   local db_file="$BACKUP_DIR/db-$ts.sql.gz"
 
   info "Dumping PostgreSQL..."
-  if docker exec v2raytunpanel-postgres pg_dump -U v2raytunpanel v2raytunpanel | gzip > "$db_file"; then
+  set -o pipefail
+  if docker exec v2raytunpanel-postgres pg_dump -U v2raytunpanel v2raytunpanel 2>/dev/null | gzip > "$db_file"; then
     success "Database saved to $db_file ($(du -sh "$db_file" | cut -f1))"
   else
     error "Database backup failed"
     rm -f "$db_file"
+    set +o pipefail
     return 1
   fi
+  set +o pipefail
 
   if docker ps --format '{{.Names}}' | grep -q '^v2raytunpanel-redis$'; then
     info "Saving Redis snapshot..."
-    docker exec v2raytunpanel-redis redis-cli BGSAVE >/dev/null 2>&1 || true
-    sleep 2
+    docker exec v2raytunpanel-redis redis-cli SAVE >/dev/null 2>&1 || true
     docker cp v2raytunpanel-redis:/data/dump.rdb "$BACKUP_DIR/redis-$ts.rdb" 2>/dev/null \
       && success "Redis snapshot saved" \
       || warn "Redis snapshot skipped"
