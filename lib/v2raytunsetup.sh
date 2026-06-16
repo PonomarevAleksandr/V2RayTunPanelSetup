@@ -170,8 +170,35 @@ EOF
     return 1
   }
 
+  info "Starting database first..."
+  cd "$PANEL_DOCKER_DIR"
+  docker compose up -d postgres redis rabbitmq || {
+    error "Failed to start infrastructure containers"
+    echo "Check logs: cd $PANEL_DOCKER_DIR && docker compose logs"
+    return 1
+  }
+
+  # Postgres reports healthy via pg_isready before its init has finished applying
+  # the password, which makes the backend's first migration fail with P1000.
+  # Wait until an authenticated query actually succeeds before starting the app.
+  info "Waiting for database to accept connections..."
+  local pg_ok=0 j
+  for j in $(seq 1 45); do
+    if docker compose exec -T -e PGPASSWORD="$pg_pass" postgres \
+        psql -U v2raytunpanel -d v2raytunpanel -c 'select 1' >/dev/null 2>&1; then
+      pg_ok=1
+      break
+    fi
+    sleep 2
+  done
+  if [ "$pg_ok" != "1" ]; then
+    error "Database did not become ready in time"
+    echo "Check logs: cd $PANEL_DOCKER_DIR && docker compose logs postgres"
+    return 1
+  fi
+
   info "Starting services..."
-  (cd "$PANEL_DOCKER_DIR" && docker compose up -d) || {
+  docker compose up -d || {
     error "docker compose up failed"
     echo "Check logs: cd $PANEL_DOCKER_DIR && docker compose logs"
     return 1
