@@ -237,7 +237,7 @@ EOF
   echo -e "${MAGENTA}────────────────────────────────────────────────────────────────────${RESET}"
   echo -e "  ${BOLD_CYAN}Next steps:${RESET}"
   echo -e "  1. Wait ~60 seconds for Caddy to obtain an SSL certificate"
-  echo -e "  2. Open ${GREEN}https://${panel_domain}/register${RESET}"
+  echo -e "  2. Open ${GREEN}https://${panel_domain}/auth/login${RESET}"
   echo -e "  3. Create the first admin account"
   echo ""
   echo -e "  ${BOLD_CYAN}Useful commands:${RESET}"
