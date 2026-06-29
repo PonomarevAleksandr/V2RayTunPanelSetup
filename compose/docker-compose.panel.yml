@@ -9,6 +9,9 @@ services:
     image: postgres:17-alpine
     container_name: v2raytunpanel-postgres
     restart: unless-stopped
+    # Raise max_connections so multiple backend workers can each hold a larger
+    # Prisma pool (connection_limit) without exhausting Postgres under load.
+    command: ["postgres", "-c", "max_connections=200"]
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-v2raytunpanel}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
@@ -65,7 +68,7 @@ services:
     environment:
       NODE_ENV: production
       APP_PORT: 3000
-      DATABASE_URL: postgresql://${POSTGRES_USER:-v2raytunpanel}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-v2raytunpanel}?schema=public
+      DATABASE_URL: postgresql://${POSTGRES_USER:-v2raytunpanel}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-v2raytunpanel}?schema=public&connection_limit=${DB_CONNECTION_LIMIT:-15}&pool_timeout=20
       REDIS_URL: redis://redis:6379/0
       RABBITMQ_URL: amqp://${RABBITMQ_USER:-v2raytunpanel}:${RABBITMQ_PASSWORD}@rabbitmq:5672/${RABBITMQ_VHOST:-v2raytunpanel}
       JWT_AUTH_SECRET: ${JWT_AUTH_SECRET:?Set JWT_AUTH_SECRET in .env}
