@@ -873,7 +873,9 @@ migrate_from_remna() {
   opts_json=$(python3 -c 'import json,sys
 print(json.dumps({
   "scope":{"configProfiles":True,"hosts":True,"squads":True,"externalSquads":True,
-           "subscriptionSettings":False,"users":True,"hwidDevices":True,"nodes":True},
+           "subscriptionSettings":False,"subscriptionTemplates":True,
+           "subscriptionPageConfigs":True,"configSnippets":True,
+           "users":True,"hwidDevices":True,"nodes":True},
   "preserveShortUuid":sys.argv[1]=="true","preserveCreatedAt":True,
   "usernameConflict":sys.argv[2],"unsupportedStrategyFallback":"MONTH","dryRun":sys.argv[3]=="true"}))' \
     "$preserve_short" "$conflict" "$dry")
@@ -948,6 +950,74 @@ PY
   fi
 }
 
+# ── SSH helpers for node re-provisioning ─────────────────────────────────────
+# Prompt for an auth method and credentials. Sets MIG_SSH_MODE (key|password|agent),
+# MIG_SSH_USER, MIG_SSH_KEY, MIG_SSH_PASS.
+_migrate_ssh_prompt_auth() {
+  echo ""
+  echo -e "${CYAN}  SSH authentication method:${RESET}"
+  echo -e "    ${BLUE}1)${RESET} SSH private key (file path)"
+  echo -e "    ${BLUE}2)${RESET} Login / password"
+  echo -e "    ${BLUE}3)${RESET} Default key / ssh-agent"
+  local choice
+  read -rp "  Choice [1]: " choice; choice="${choice:-1}"
+  read -rp "  SSH user [root]: " MIG_SSH_USER; MIG_SSH_USER="${MIG_SSH_USER:-root}"
+  MIG_SSH_KEY=""; MIG_SSH_PASS=""; MIG_SSH_MODE="agent"
+  case "$choice" in
+    1)
+      MIG_SSH_MODE="key"
+      read -rp "  Private key path [~/.ssh/id_ed25519]: " MIG_SSH_KEY
+      MIG_SSH_KEY="${MIG_SSH_KEY:-$HOME/.ssh/id_ed25519}"
+      MIG_SSH_KEY="${MIG_SSH_KEY/#\~/$HOME}"
+      if [ ! -f "$MIG_SSH_KEY" ]; then
+        warn "Key file not found: $MIG_SSH_KEY (will still try, ssh may fall back to agent)"
+      fi
+      ;;
+    2)
+      MIG_SSH_MODE="password"
+      if ! command -v sshpass >/dev/null 2>&1; then
+        info "Installing sshpass (required for password auth)..."
+        if command -v apt-get >/dev/null 2>&1; then
+          apt-get install -y -qq sshpass >/dev/null 2>&1 || true
+        elif command -v yum >/dev/null 2>&1; then
+          yum install -y -q sshpass >/dev/null 2>&1 || true
+        fi
+        if ! command -v sshpass >/dev/null 2>&1; then
+          warn "Could not install sshpass automatically. Falling back to key/agent auth."
+          MIG_SSH_MODE="agent"
+          return 0
+        fi
+      fi
+      read -rsp "  SSH password: " MIG_SSH_PASS; echo ""
+      ;;
+    *) MIG_SSH_MODE="agent" ;;
+  esac
+}
+
+# Run a command on a node over SSH honoring the chosen auth mode.
+# Usage: _migrate_ssh_run <address> <remote_command>   (stdin is forwarded)
+_migrate_ssh_run() {
+  local address="$1" cmd="$2"
+  local base_opts=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=12 -o LogLevel=ERROR)
+  case "$MIG_SSH_MODE" in
+    key)      ssh "${base_opts[@]}" -o BatchMode=yes -i "$MIG_SSH_KEY" "$MIG_SSH_USER@$address" "$cmd" ;;
+    password) sshpass -p "$MIG_SSH_PASS" ssh "${base_opts[@]}" -o PreferredAuthentications=password -o PubkeyAuthentication=no "$MIG_SSH_USER@$address" "$cmd" ;;
+    *)        ssh "${base_opts[@]}" -o BatchMode=yes "$MIG_SSH_USER@$address" "$cmd" ;;
+  esac
+}
+
+# Test connectivity to a node and print a status line. Returns 0 when reachable.
+_migrate_ssh_check() {
+  local address="$1"
+  printf "  %-42s" "$MIG_SSH_USER@$address"
+  if _migrate_ssh_run "$address" "echo ok" </dev/null >/dev/null 2>&1; then
+    echo -e "${GREEN}[CONNECTED]${RESET}"
+    return 0
+  fi
+  echo -e "${RED}[FAILED]${RESET}"
+  return 1
+}
+
 # Bring migrated (disabled) nodes online: attempt SSH auto-install, else print
 # the manual command per node.
 migrate_reprovision_nodes() {
@@ -977,13 +1047,29 @@ PY
 
   local use_ssh="n"
   if confirm "  Try automatic re-provisioning over SSH?" "n"; then use_ssh="y"; fi
-  local ssh_user ssh_key
   if [ "$use_ssh" = "y" ]; then
-    read -rp "  SSH user for node servers [root]: " ssh_user; ssh_user="${ssh_user:-root}"
-    read -rp "  SSH private key path (blank = default/agent): " ssh_key
+    _migrate_ssh_prompt_auth
+    echo ""
+    echo -e "${CYAN}  Checking SSH connectivity to every node:${RESET}"
+    while IFS=$'\t' read -r _u _n _address; do
+      [ -z "$_address" ] && continue
+      _migrate_ssh_check "$_address" || true
+    done <<< "$list"
+    echo ""
+    if ! confirm "  Continue with these credentials?" "y"; then
+      _migrate_ssh_prompt_auth
+      echo ""
+      echo -e "${CYAN}  Re-checking SSH connectivity:${RESET}"
+      while IFS=$'\t' read -r _u _n _address; do
+        [ -z "$_address" ] && continue
+        _migrate_ssh_check "$_address" || true
+      done <<< "$list"
+      echo ""
+    fi
   fi
 
-  while IFS=$'\t' read -r uuid name address; do
+  # fd 3 keeps stdin free for the interactive per-node prompts below.
+  while IFS=$'\t' read -r -u 3 uuid name address; do
     [ -z "$uuid" ] && continue
     echo ""
     echo -e "${BOLD_MAGENTA}  Node: $name ($address)${RESET}"
@@ -997,10 +1083,19 @@ PY
 
     local done_auto="n"
     if [ "$use_ssh" = "y" ]; then
-      local ssh_opts="-o StrictHostKeyChecking=no -o ConnectTimeout=15"
-      [ -n "$ssh_key" ] && ssh_opts="$ssh_opts -i $ssh_key"
-      info "Connecting to $ssh_user@$address ..."
-      if printf '%s' "$compose" | ssh $ssh_opts "$ssh_user@$address" \
+      if ! _migrate_ssh_check "$address"; then
+        warn "SSH is not reachable for $name — offering per-node credentials."
+        if confirm "  Enter different credentials for this node?" "y"; then
+          local prev_mode="$MIG_SSH_MODE" prev_user="$MIG_SSH_USER" prev_key="$MIG_SSH_KEY" prev_pass="$MIG_SSH_PASS"
+          _migrate_ssh_prompt_auth
+          if ! _migrate_ssh_check "$address"; then
+            warn "Still unreachable — falling back to manual instructions."
+            MIG_SSH_MODE="$prev_mode"; MIG_SSH_USER="$prev_user"; MIG_SSH_KEY="$prev_key"; MIG_SSH_PASS="$prev_pass"
+          fi
+        fi
+      fi
+      info "Connecting to $MIG_SSH_USER@$address ..."
+      if printf '%s' "$compose" | _migrate_ssh_run "$address" \
           'mkdir -p /opt/v2raytunpanel-node && cat > /opt/v2raytunpanel-node/docker-compose.yml && cd /opt/v2raytunpanel-node && (command -v docker >/dev/null || curl -fsSL https://get.docker.com | sh) && docker compose pull && docker compose up -d' \
           >/dev/null 2>&1; then
         success "Re-provisioned $name over SSH."
@@ -1020,7 +1115,7 @@ PY
       echo ""
       echo -e "${DIM}  After the node connects, enable it in the panel (Nodes page).${RESET}"
     fi
-  done <<< "$list"
+  done 3<<< "$list"
 }
 
 # ──────────────────────────────────────────────────────────────────────────────
