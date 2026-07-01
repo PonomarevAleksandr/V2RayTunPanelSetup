@@ -750,6 +750,278 @@ backup_restore() {
 }
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Migration from Remnawave
+# ──────────────────────────────────────────────────────────────────────────────
+PANEL_API="http://localhost:3000/api"
+
+# Parse a JSON value out of stdin. Uses python3 (present on Debian/Ubuntu).
+_json_get() {
+  # $1 = dotted path, e.g. data.accessToken  (arrays as .0, .1)
+  python3 - "$1" <<'PY' 2>/dev/null
+import sys, json
+path = sys.argv[1].split('.') if sys.argv[1] else []
+try:
+    cur = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+for p in path:
+    if isinstance(cur, list):
+        try:
+            cur = cur[int(p)]
+        except Exception:
+            sys.exit(0)
+    elif isinstance(cur, dict) and p in cur:
+        cur = cur[p]
+    else:
+        sys.exit(0)
+if isinstance(cur, (dict, list)):
+    print(json.dumps(cur))
+elif isinstance(cur, bool):
+    print('true' if cur else 'false')
+elif cur is None:
+    print('')
+else:
+    print(cur)
+PY
+}
+
+_require_migration_prereqs() {
+  if ! command -v python3 >/dev/null 2>&1; then
+    error "python3 is required for migration (JSON handling). Install it: apt-get install -y python3"
+    return 1
+  fi
+  if ! curl -sf "$PANEL_API/health/ready" >/dev/null 2>&1; then
+    error "Local panel is not reachable at $PANEL_API. Install/start the panel first."
+    return 1
+  fi
+  return 0
+}
+
+# Log into the local (target) panel, echo the JWT on success.
+_panel_login() {
+  local user="$1" pass="$2" resp token
+  resp=$(curl -s -m 15 -X POST "$PANEL_API/auth/login" \
+    -H 'Content-Type: application/json' \
+    -d "$(python3 -c 'import json,sys; print(json.dumps({"username":sys.argv[1],"password":sys.argv[2]}))' "$user" "$pass")")
+  token=$(printf '%s' "$resp" | _json_get data.accessToken)
+  [ -z "$token" ] && token=$(printf '%s' "$resp" | _json_get accessToken)
+  printf '%s' "$token"
+}
+
+migrate_from_remna() {
+  print_banner
+  echo -e "${BOLD_MAGENTA}  Migration from Remnawave${RESET}"
+  echo -e "${MAGENTA}════════════════════════════════════════════════════════════════════${RESET}"
+  echo ""
+  echo -e "${DIM}Transfers users (with their keys/subscriptions), config profiles, hosts,"
+  echo -e "squads and node metadata from a Remnawave panel into this panel.${RESET}"
+  echo ""
+
+  _require_migration_prereqs || return 1
+
+  # ── Target panel admin ──────────────────────────────────────────────────
+  echo -e "${CYAN}Step 1/4 — Log in to THIS panel (target)${RESET}"
+  read -rp "  Admin username: " TGT_USER
+  read -rsp "  Admin password: " TGT_PASS; echo ""
+  local jwt
+  jwt=$(_panel_login "$TGT_USER" "$TGT_PASS")
+  if [ -z "$jwt" ]; then
+    error "Login to local panel failed. Check the admin username/password."
+    return 1
+  fi
+  success "Authenticated with the local panel."
+
+  # ── Source panel ────────────────────────────────────────────────────────
+  echo ""
+  echo -e "${CYAN}Step 2/4 — Source Remnawave panel${RESET}"
+  read -rp "  Source panel URL (https://panel.example.com): " SRC_URL
+  read -rsp "  Source token (admin or API token, read access): " SRC_TOKEN; echo ""
+  local insecure="false"
+  if confirm "  Allow self-signed TLS on the source?" "n"; then insecure="true"; fi
+
+  local src_json
+  src_json=$(python3 -c 'import json,sys; print(json.dumps({"kind":"remnawave-api","config":{"baseUrl":sys.argv[1],"token":sys.argv[2],"allowInsecureTls":sys.argv[3]=="true"}}))' "$SRC_URL" "$SRC_TOKEN" "$insecure")
+
+  info "Testing connection to the source..."
+  local test_resp test_panel
+  test_resp=$(curl -s -m 30 -X POST "$PANEL_API/migration/test-connection" \
+    -H "Authorization: Bearer $jwt" -H 'Content-Type: application/json' \
+    -d "{\"source\":$src_json}")
+  test_panel=$(printf '%s' "$test_resp" | _json_get data.sourcePanel)
+  if [ -z "$test_panel" ]; then
+    local emsg
+    emsg=$(printf '%s' "$test_resp" | _json_get message)
+    [ -z "$emsg" ] && emsg=$(printf '%s' "$test_resp" | _json_get error.message)
+    error "Connection failed: ${emsg:-unknown error}"
+    return 1
+  fi
+  success "Connected to source: $test_panel"
+
+  # ── Options ─────────────────────────────────────────────────────────────
+  echo ""
+  echo -e "${CYAN}Step 3/4 — Options${RESET}"
+  local preserve_short="true" conflict="skip" dry="false"
+  confirm "  Preserve short UUID (keep existing subscription links)?" "y" || preserve_short="false"
+  echo "  On username conflict: [1] skip (default)  [2] suffix  [3] overwrite"
+  read -rp "  Choice [1]: " c
+  case "$c" in 2) conflict="suffix";; 3) conflict="overwrite";; *) conflict="skip";; esac
+  if confirm "  Dry run first (count only, write nothing)?" "y"; then dry="true"; fi
+
+  local opts_json
+  opts_json=$(python3 -c 'import json,sys
+print(json.dumps({
+  "scope":{"configProfiles":True,"hosts":True,"squads":True,"externalSquads":True,
+           "subscriptionSettings":False,"users":True,"hwidDevices":True,"nodes":True},
+  "preserveShortUuid":sys.argv[1]=="true","preserveCreatedAt":True,
+  "usernameConflict":sys.argv[2],"unsupportedStrategyFallback":"MONTH","dryRun":sys.argv[3]=="true"}))' \
+    "$preserve_short" "$conflict" "$dry")
+
+  info "Computing preview (nothing is changed)..."
+  local prev
+  prev=$(curl -s -m 120 -X POST "$PANEL_API/migration/preview" \
+    -H "Authorization: Bearer $jwt" -H 'Content-Type: application/json' \
+    -d "{\"source\":$src_json,\"options\":$opts_json}")
+  echo ""
+  echo -e "${BOLD_GREEN}  Preview:${RESET}"
+  printf '%s' "$prev" | python3 - <<'PY' 2>/dev/null || { error "Preview failed (see panel logs)."; return 1; }
+import sys, json
+d = json.load(sys.stdin)
+data = d.get('data', d)
+c = data.get('counts', {})
+for k in ['users','configProfiles','hosts','squads','externalSquads','hwidDevices','nodes']:
+    print(f"    {k:16} {c.get(k,0)}")
+if data.get('usernameConflicts'):
+    print(f"    username conflicts: {len(data['usernameConflicts'])}")
+for w in data.get('warnings', []):
+    print(f"    [warn] {w.get('message','')}")
+for b in data.get('blockers', []):
+    print(f"    [BLOCK] {b.get('message','')}")
+sys.exit(2 if data.get('blockers') else 0)
+PY
+  local prev_rc=$?
+  if [ "$prev_rc" = "2" ]; then
+    error "Migration is blocked by the issues above. Resolve them and retry."
+    return 1
+  fi
+
+  # ── Execute ─────────────────────────────────────────────────────────────
+  echo ""
+  echo -e "${CYAN}Step 4/4 — Run${RESET}"
+  if [ "$dry" = "false" ]; then
+    warn "This writes data into the current panel. A backup first is recommended (menu option 5)."
+    confirm "  Proceed with the real migration?" "n" || { info "Cancelled."; return 0; }
+  fi
+
+  info "Running migration..."
+  local res
+  res=$(curl -s -m 600 -X POST "$PANEL_API/migration/execute" \
+    -H "Authorization: Bearer $jwt" -H 'Content-Type: application/json' \
+    -d "{\"source\":$src_json,\"options\":$opts_json}")
+  echo ""
+  echo -e "${BOLD_GREEN}  Report:${RESET}"
+  printf '%s' "$res" | python3 - <<'PY' 2>/dev/null || { error "Migration failed (see panel logs)."; return 1; }
+import sys, json
+d = json.load(sys.stdin)
+data = d.get('data', d)
+if data.get('dryRun'):
+    print("    (dry run — nothing was written)")
+for k in ['users','configProfiles','hosts','squads','externalSquads','hwidDevices','nodes']:
+    s = data.get(k, {})
+    if isinstance(s, dict):
+        line = f"    {k:16} imported {s.get('imported',0)}, skipped {s.get('skipped',0)}"
+        if s.get('failed'): line += f", failed {s.get('failed')}"
+        print(line)
+for w in data.get('warnings', []):
+    print(f"    [note] {w.get('message','')}")
+PY
+
+  echo ""
+  if [ "$dry" = "false" ]; then
+    success "Migration finished."
+    if confirm "  Re-provision migrated nodes now (SSH / manual)?" "n"; then
+      migrate_reprovision_nodes "$jwt"
+    fi
+  else
+    info "Dry run complete. Re-run without dry run to apply."
+  fi
+}
+
+# Bring migrated (disabled) nodes online: attempt SSH auto-install, else print
+# the manual command per node.
+migrate_reprovision_nodes() {
+  local jwt="$1" nodes
+  nodes=$(curl -s -m 30 "$PANEL_API/nodes" -H "Authorization: Bearer $jwt")
+  local list
+  list=$(printf '%s' "$nodes" | python3 - <<'PY' 2>/dev/null
+import sys, json
+d = json.load(sys.stdin)
+arr = d.get('data', d)
+if isinstance(arr, dict):
+    arr = arr.get('nodes', [])
+for n in arr:
+    if n.get('isDisabled'):
+        print(f"{n.get('uuid')}\t{n.get('name')}\t{n.get('address')}")
+PY
+)
+  if [ -z "$list" ]; then
+    info "No disabled nodes to re-provision."
+    return 0
+  fi
+
+  echo ""
+  echo -e "${CYAN}Disabled nodes to bring online:${RESET}"
+  echo "$list" | awk -F'\t' '{print "  - "$2" ("$3")"}'
+  echo ""
+
+  local use_ssh="n"
+  if confirm "  Try automatic re-provisioning over SSH?" "n"; then use_ssh="y"; fi
+  local ssh_user ssh_key
+  if [ "$use_ssh" = "y" ]; then
+    read -rp "  SSH user for node servers [root]: " ssh_user; ssh_user="${ssh_user:-root}"
+    read -rp "  SSH private key path (blank = default/agent): " ssh_key
+  fi
+
+  while IFS=$'\t' read -r uuid name address; do
+    [ -z "$uuid" ] && continue
+    echo ""
+    echo -e "${BOLD_MAGENTA}  Node: $name ($address)${RESET}"
+    local compose
+    compose=$(curl -s -m 30 "$PANEL_API/nodes/$uuid/docker-compose" -H "Authorization: Bearer $jwt" | _json_get data.dockerCompose)
+    [ -z "$compose" ] && compose=$(curl -s -m 30 "$PANEL_API/nodes/$uuid/docker-compose" -H "Authorization: Bearer $jwt" | _json_get dockerCompose)
+    if [ -z "$compose" ]; then
+      warn "Could not fetch docker-compose for this node from the panel; skipping."
+      continue
+    fi
+
+    local done_auto="n"
+    if [ "$use_ssh" = "y" ]; then
+      local ssh_opts="-o StrictHostKeyChecking=no -o ConnectTimeout=15"
+      [ -n "$ssh_key" ] && ssh_opts="$ssh_opts -i $ssh_key"
+      info "Connecting to $ssh_user@$address ..."
+      if printf '%s' "$compose" | ssh $ssh_opts "$ssh_user@$address" \
+          'mkdir -p /opt/v2raytunpanel-node && cat > /opt/v2raytunpanel-node/docker-compose.yml && cd /opt/v2raytunpanel-node && (command -v docker >/dev/null || curl -fsSL https://get.docker.com | sh) && docker compose pull && docker compose up -d' \
+          >/dev/null 2>&1; then
+        success "Re-provisioned $name over SSH."
+        curl -s -m 15 -X POST "$PANEL_API/nodes/$uuid/enable" -H "Authorization: Bearer $jwt" >/dev/null 2>&1 || true
+        done_auto="y"
+      else
+        warn "Automatic SSH re-provisioning failed for $name."
+      fi
+    fi
+
+    if [ "$done_auto" = "n" ]; then
+      echo -e "${YELLOW}  Manual step for $name:${RESET} on the node server run"
+      echo -e "    ${DIM}bash <(curl -fsSL https://raw.githubusercontent.com/v2RayTun/install-panel/main/install.sh)${RESET}"
+      echo -e "    ${DIM}then choose 'Install Node' and paste this docker-compose:${RESET}"
+      echo ""
+      echo "$compose"
+      echo ""
+      echo -e "${DIM}  After the node connects, enable it in the panel (Nodes page).${RESET}"
+    fi
+  done <<< "$list"
+}
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Menus
 # ──────────────────────────────────────────────────────────────────────────────
 menu_main() {
@@ -765,6 +1037,7 @@ menu_main() {
     echo -e "  ${BLUE}6)${RESET} Restore from backup"
     echo -e "  ${BLUE}7)${RESET} Show status"
     echo -e "  ${BLUE}8)${RESET} Tail backend logs"
+    echo -e "  ${BLUE}m)${RESET} Migrate from Remnawave"
     echo -e "  ${BLUE}d)${RESET} Remove Panel  ${DIM}(destructive)${RESET}"
     echo -e "  ${BLUE}D)${RESET} Remove Node   ${DIM}(destructive)${RESET}"
     echo -e "  ${RED}0)${RESET} Exit"
@@ -779,6 +1052,7 @@ menu_main() {
       6) backup_restore; press_any_key ;;
       7) panel_status; press_any_key ;;
       8) panel_logs ;;
+      m|M) migrate_from_remna; press_any_key ;;
       d) panel_remove; press_any_key ;;
       D) node_remove; press_any_key ;;
       0) info "Goodbye!"; exit 0 ;;
@@ -804,6 +1078,7 @@ Commands:
   logs [service]   Tail container logs (default: backend)
   backup           Create database + redis backup
   restore          Restore database from backup
+  migrate          Migrate from a Remnawave panel into this panel
   attach           Attach to running tmux setup session
   resume           Resume interrupted installation (docker compose up -d)
   help             Show this help
@@ -849,6 +1124,7 @@ main() {
     install-node)   node_install ;;
     backup)         backup_create ;;
     restore)        backup_restore ;;
+    migrate)        migrate_from_remna ;;
     remove-panel)   panel_remove ;;
     remove-node)    node_remove ;;
     help|--help|-h) menu_help ;;
