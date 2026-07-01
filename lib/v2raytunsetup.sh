@@ -815,6 +815,8 @@ migrate_from_remna() {
   echo ""
   echo -e "${DIM}Transfers users (with their keys/subscriptions), config profiles, hosts,"
   echo -e "squads and node metadata from a Remnawave panel into this panel.${RESET}"
+  echo -e "${DIM}Verified for Remnawave 2.8.0 — newer versions may need a tool update;"
+  echo -e "field mismatches are reported at the preview step.${RESET}"
   echo ""
 
   _require_migration_prereqs || return 1
