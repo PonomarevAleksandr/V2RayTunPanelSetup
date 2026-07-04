@@ -16,8 +16,8 @@ SETUP_DIR="$(dirname "$SCRIPT_DIR")"
 [ -f "$SETUP_DIR/.config" ] && . "$SETUP_DIR/.config"
 
 REGISTRY="${V2RAYTUN_REGISTRY:-docker-registry.v2raytun.com}"
-VERSION="${V2RAYTUN_VERSION:-1.0.13}"
-INSTALLER_VERSION="${INSTALLER_VERSION:-1.0.13}"
+VERSION="${V2RAYTUN_VERSION:-1.0.20}"
+INSTALLER_VERSION="${INSTALLER_VERSION:-1.0.20}"
 
 PANEL_DIR="/opt/v2raytunpanel"
 PANEL_DOCKER_DIR="$PANEL_DIR/docker"
@@ -810,11 +810,13 @@ _panel_login() {
 
 migrate_from_remna() {
   print_banner
-  echo -e "${BOLD_MAGENTA}  Migration from Remnawave${RESET}"
+  echo -e "${BOLD_MAGENTA}  Migration from Remnawave ${YELLOW}[BETA]${RESET}"
   echo -e "${MAGENTA}════════════════════════════════════════════════════════════════════${RESET}"
   echo ""
+  echo -e "${YELLOW}This feature is in beta testing — take a backup before running it.${RESET}"
   echo -e "${DIM}Transfers users (with their keys/subscriptions), config profiles, hosts,"
-  echo -e "squads and node metadata from a Remnawave panel into this panel.${RESET}"
+  echo -e "squads, subscription templates and node metadata from a Remnawave panel"
+  echo -e "into this panel.${RESET}"
   echo -e "${DIM}Verified for Remnawave 2.8.0 — newer versions may need a tool update;"
   echo -e "field mismatches are reported at the preview step.${RESET}"
   echo ""
@@ -892,8 +894,9 @@ import sys, json
 d = json.load(sys.stdin)
 data = d.get('data', d)
 c = data.get('counts', {})
-for k in ['users','configProfiles','hosts','squads','externalSquads','hwidDevices','nodes']:
-    print(f"    {k:16} {c.get(k,0)}")
+for k in ['users','configProfiles','hosts','squads','externalSquads','hwidDevices','nodes',
+          'subscriptionTemplates','subscriptionPageConfigs','configSnippets']:
+    print(f"    {k:24} {c.get(k,0)}")
 if data.get('usernameConflicts'):
     print(f"    username conflicts: {len(data['usernameConflicts'])}")
 for w in data.get('warnings', []):
@@ -929,10 +932,11 @@ d = json.load(sys.stdin)
 data = d.get('data', d)
 if data.get('dryRun'):
     print("    (dry run — nothing was written)")
-for k in ['users','configProfiles','hosts','squads','externalSquads','hwidDevices','nodes']:
+for k in ['users','configProfiles','hosts','squads','externalSquads','hwidDevices','nodes',
+          'subscriptionTemplates','subscriptionPageConfigs','configSnippets']:
     s = data.get(k, {})
     if isinstance(s, dict):
-        line = f"    {k:16} imported {s.get('imported',0)}, skipped {s.get('skipped',0)}"
+        line = f"    {k:24} imported {s.get('imported',0)}, skipped {s.get('skipped',0)}"
         if s.get('failed'): line += f", failed {s.get('failed')}"
         print(line)
 for w in data.get('warnings', []):
@@ -1134,7 +1138,7 @@ menu_main() {
     echo -e "  ${BLUE}6)${RESET} Restore from backup"
     echo -e "  ${BLUE}7)${RESET} Show status"
     echo -e "  ${BLUE}8)${RESET} Tail backend logs"
-    echo -e "  ${BLUE}m)${RESET} Migrate from Remnawave"
+    echo -e "  ${BLUE}m)${RESET} Migrate from Remnawave ${YELLOW}[beta]${RESET}"
     echo -e "  ${BLUE}d)${RESET} Remove Panel  ${DIM}(destructive)${RESET}"
     echo -e "  ${BLUE}D)${RESET} Remove Node   ${DIM}(destructive)${RESET}"
     echo -e "  ${RED}0)${RESET} Exit"
