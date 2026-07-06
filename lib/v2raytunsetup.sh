@@ -336,9 +336,30 @@ caddy_setup() {
   mkdir -p "$CADDY_DIR"
   cd "$CADDY_DIR"
 
+  # Subscription-link User-Agent router (shared by both layouts):
+  #   /sub/{id} in a browser    → web page (frontend :8080)
+  #   /sub/{id} in a VPN client → raw subscription config (backend), by
+  #     rewriting /sub/... to /api/sub/... so the client gets configs, not HTML.
+  # Every real browser sends a "Mozilla/..." User-Agent while subscription
+  # clients (v2RayTun, Happ, Streisand, Shadowrocket, ...) do not, so a single
+  # Mozilla check cleanly separates the two. Client requests are the fallthrough.
+  local sub_browser_matcher='    @subBrowser {
+        path /sub /sub/*
+        header User-Agent *Mozilla*
+    }
+    handle @subBrowser {
+        reverse_proxy localhost:8080
+    }
+    @subClient path /sub /sub/*
+    handle @subClient {
+        rewrite * /api{uri}
+        reverse_proxy localhost:3000
+    }'
+
   if [ "$panel_domain" = "$sub_domain" ]; then
     cat > Caddyfile << EOF
 ${panel_domain} {
+${sub_browser_matcher}
     handle /api/* {
         reverse_proxy localhost:3000
     }
@@ -365,12 +386,7 @@ ${panel_domain} {
 }
 
 ${sub_domain} {
-    handle /sub/* {
-        reverse_proxy localhost:8080
-    }
-    handle /sub {
-        redir /sub/ permanent
-    }
+${sub_browser_matcher}
     handle {
         reverse_proxy localhost:3000
     }
