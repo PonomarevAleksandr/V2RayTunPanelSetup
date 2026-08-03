@@ -435,24 +435,29 @@ ensure_awg_kernel_module() {
   info "Installing AmneziaWG kernel module (amneziawg-dkms)..."
 
   if command -v apt-get >/dev/null 2>&1; then
+    export DEBIAN_FRONTEND=noninteractive
     apt-get update -qq
     apt-get install -y -qq linux-headers-"$(uname -r)" dkms 2>/dev/null || true
 
-    if ! dpkg -l amneziawg-dkms >/dev/null 2>&1; then
+    # Preferred: the official AmneziaWG PPA (Ubuntu). The old single-URL GitHub
+    # release deb is unreliable (asset names/versions drift and 404), so the PPA
+    # is the primary path and the direct deb below is only a fallback.
+    if ! dpkg -l amneziawg-dkms 2>/dev/null | grep -q '^ii' && grep -qi ubuntu /etc/os-release 2>/dev/null; then
+      info "Installing AmneziaWG from the official PPA..."
+      apt-get install -y -qq software-properties-common 2>/dev/null || true
+      add-apt-repository -y ppa:amnezia/ppa >/dev/null 2>&1 && apt-get update -qq
+      apt-get install -y amneziawg-dkms 2>&1 | tail -3 || true
+    fi
+
+    if ! dpkg -l amneziawg-dkms 2>/dev/null | grep -q '^ii'; then
+      # Fallback: direct release deb (best-effort, may not exist for all arches).
       local awg_deb="/tmp/amneziawg-dkms.deb"
-      local kernel_ver
-      kernel_ver="$(uname -r)"
       local arch
       arch="$(dpkg --print-architecture)"
-
       if curl -fsSL -o "$awg_deb" \
         "https://github.com/amnezia-vpn/amneziawg-linux-kernel-module/releases/latest/download/amneziawg-dkms_1.0.0_${arch}.deb" 2>/dev/null; then
         dpkg -i "$awg_deb" || apt-get install -f -y -qq
         rm -f "$awg_deb"
-      else
-        warn "Could not download amneziawg-dkms package"
-        warn "You may need to install it manually: https://github.com/amnezia-vpn/amneziawg-linux-kernel-module"
-        return 1
       fi
     fi
 
