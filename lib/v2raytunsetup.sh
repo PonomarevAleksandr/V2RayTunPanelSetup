@@ -265,13 +265,24 @@ panel_update() {
 
   cd "$PANEL_DOCKER_DIR"
 
-  info "Pulling latest images..."
+  # Bring the pinned versions in .env up to this installer's target. Without this
+  # the panel image tag (VERSION) and the baked node image (NODE_DOCKER_IMAGE)
+  # stay at whatever was written at install time, so "Update Panel" would just
+  # re-pull the same old version and freshly-created nodes would keep pinning an
+  # outdated node image.
+  if [ -f "$PANEL_DOCKER_DIR/.env" ]; then
+    info "Setting version to ${VERSION}..."
+    sed -i "s|^VERSION=.*|VERSION=${VERSION}|" "$PANEL_DOCKER_DIR/.env"
+    sed -i "s|^NODE_DOCKER_IMAGE=.*|NODE_DOCKER_IMAGE=${REGISTRY}/v2raytunpanel-node:${VERSION}|" "$PANEL_DOCKER_DIR/.env"
+  fi
+
+  info "Pulling images (${VERSION})..."
   docker compose pull
 
   info "Restarting services with the new images..."
   docker compose up -d
 
-  success "Panel updated"
+  success "Panel updated to ${VERSION}"
   echo ""
   docker compose ps
 }
