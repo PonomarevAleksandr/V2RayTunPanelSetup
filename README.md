@@ -1,10 +1,26 @@
 # V2RayTun Panel — Universal Installer
 
-One-command installer for the V2RayTun Panel beta. No GitHub token, no source clone, no manual configuration. Pulls pre-built Docker images from a private registry.
+Installer for the V2RayTun Panel. Pulls pre-built Docker images from a private registry. **This repo is private** — deployment requires the team deploy key.
 
-```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/PonomarevAleksandr/V2RayTunPanelSetup/main/install.sh)
-```
+## Install (team, via deploy key)
+
+1. Put the team deploy key on the server (get the private key from the team lead):
+
+   ```bash
+   mkdir -p ~/.ssh && chmod 700 ~/.ssh
+   # paste the private key into ~/.ssh/v2raytun_deploy, then:
+   chmod 600 ~/.ssh/v2raytun_deploy
+   ```
+
+2. Clone the repo with that key and run the installer from the clone:
+
+   ```bash
+   GIT_SSH_COMMAND='ssh -i ~/.ssh/v2raytun_deploy -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new' \
+     git clone git@github.com:PonomarevAleksandr/V2RayTunPanelSetup.git
+   cd V2RayTunPanelSetup && sudo bash install.sh
+   ```
+
+   The installer uses the assets from the clone (no public raw access needed).
 
 The installer asks for two things:
 

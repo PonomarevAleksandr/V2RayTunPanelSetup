@@ -27,6 +27,12 @@ REPO="${V2RAYTUNSETUP_REPO:-PonomarevAleksandr/V2RayTunPanelSetup}"
 BRANCH="${V2RAYTUNSETUP_BRANCH:-main}"
 RAW_BASE="https://raw.githubusercontent.com/${REPO}/${BRANCH}"
 SETUP_DIR="/opt/v2raytunpanel-setup"
+
+# Directory install.sh was run from. When the repo is cloned (the private-repo
+# flow: clone via deploy key, then `bash install.sh`), the helper assets sit
+# right here and are copied locally instead of fetched over HTTP — so a private
+# repo (no public raw access) still installs cleanly.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd || echo '')"
 TMUX_SESSION="v2raytunpanel-setup"
 
 RESET='\033[0m'
@@ -151,10 +157,21 @@ fetch_assets() {
     "compose/docker-compose.node.yml"
   )
 
+  # Prefer local assets when run from a checkout of this repo (private-repo
+  # flow); fall back to fetching over HTTP only if they're missing.
+  local from_local=0
+  if [ -n "$SCRIPT_DIR" ] && [ -f "$SCRIPT_DIR/lib/common.sh" ] && [ -f "$SCRIPT_DIR/compose/docker-compose.panel.yml" ]; then
+    from_local=1
+    info "Using helper scripts from local checkout ($SCRIPT_DIR)"
+  fi
+
   for f in "${files[@]}"; do
-    if ! curl -fsSL "${RAW_BASE}/${f}" -o "${SETUP_DIR}/${f}"; then
+    if [ "$from_local" -eq 1 ] && [ -f "$SCRIPT_DIR/$f" ]; then
+      cp "$SCRIPT_DIR/$f" "${SETUP_DIR}/${f}"
+    elif ! curl -fsSL "${RAW_BASE}/${f}" -o "${SETUP_DIR}/${f}"; then
       error "Failed to fetch ${f}"
       echo "URL: ${RAW_BASE}/${f}"
+      echo "If this repo is private, clone it with your deploy key and run install.sh from the clone."
       exit 1
     fi
   done
