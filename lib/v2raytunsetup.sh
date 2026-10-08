@@ -16,8 +16,8 @@ SETUP_DIR="$(dirname "$SCRIPT_DIR")"
 [ -f "$SETUP_DIR/.config" ] && . "$SETUP_DIR/.config"
 
 REGISTRY="${V2RAYTUN_REGISTRY:-docker-registry.v2raytun.com}"
-VERSION="${V2RAYTUN_VERSION:-1.0.53}"
-INSTALLER_VERSION="${INSTALLER_VERSION:-1.0.53}"
+VERSION="${V2RAYTUN_VERSION:-1.0.56}"
+INSTALLER_VERSION="${INSTALLER_VERSION:-1.0.56}"
 
 PANEL_DIR="/opt/v2raytunpanel"
 PANEL_DOCKER_DIR="$PANEL_DIR/docker"
@@ -148,14 +148,11 @@ JWT_AUTH_SECRET=${jwt_auth}
 JWT_API_TOKENS_SECRET=${jwt_api}
 SUB_PUBLIC_DOMAIN=${sub_domain}/api/sub
 SUBSCRIPTION_PAGE_URL=https://${sub_domain}/sub
-SWAGGER_ENABLED=true
 LOG_LEVEL=info
 BACKEND_PORT=3000
 FRONTEND_PORT=8080
 REGISTRY=${REGISTRY}
 VERSION=${VERSION}
-API_INSTANCES=max
-WORKER_INSTANCES=2
 NODE_IMAGE_SOURCE=registry
 NODE_DOCKER_IMAGE=${REGISTRY}/v2raytunpanel-node:${VERSION}
 EOF
@@ -276,15 +273,123 @@ panel_update() {
     sed -i "s|^NODE_DOCKER_IMAGE=.*|NODE_DOCKER_IMAGE=${REGISTRY}/v2raytunpanel-node:${VERSION}|" "$PANEL_DOCKER_DIR/.env"
   fi
 
+  # An install keeps the compose file of the installer that set it up. Bring it to this
+  # installer's template (the old one stays next to it): the backups volume, log rotation and
+  # healthchecks reach existing panels only this way.
+  local ts saved_backups=""
+  ts=$(date +%Y%m%d-%H%M%S)
+  if ! cmp -s "$SETUP_DIR/compose/docker-compose.panel.yml" docker-compose.yml; then
+    if ! grep -q "/app/backups" docker-compose.yml && docker ps -a --format '{{.Names}}' | grep -qx v2raytunpanel-backend; then
+      # Panel backups lived in the container's own layer: copy them out before it is recreated.
+      saved_backups="$PANEL_DIR/backups-before-$ts"
+      if docker cp v2raytunpanel-backend:/app/backups/. "$saved_backups" 2>/dev/null && [ -n "$(ls -A "$saved_backups" 2>/dev/null)" ]; then
+        info "Panel backups copied out of the old container to $saved_backups"
+      else
+        rm -rf "$saved_backups"
+        saved_backups=""
+      fi
+    fi
+    cp docker-compose.yml "docker-compose.yml.bak-$ts"
+    cp "$SETUP_DIR/compose/docker-compose.panel.yml" docker-compose.yml
+    info "docker-compose.yml brought to the current template (the previous one: docker-compose.yml.bak-$ts)"
+  fi
+
   info "Pulling images (${VERSION})..."
-  docker compose pull
+  docker compose pull || {
+    error "docker compose pull failed"
+    return 1
+  }
 
   info "Restarting services with the new images..."
-  docker compose up -d
+  docker compose up -d || {
+    error "docker compose up failed"
+    echo "Check logs: cd $PANEL_DOCKER_DIR && docker compose logs"
+    return 1
+  }
+
+  # The backend refuses to start on a database schema it could not update, so a panel that
+  # never gets ready is a failed update, not a slow one.
+  info "Waiting for the backend to become ready..."
+  if ! wait_backend_ready 180; then
+    error "The backend did not become ready. See: cd $PANEL_DOCKER_DIR && docker compose logs backend"
+    [ -n "$saved_backups" ] && warn "The old panel backups are kept in $saved_backups"
+    return 1
+  fi
+
+  if [ -n "$saved_backups" ]; then
+    if docker cp "$saved_backups/." v2raytunpanel-backend:/app/backups/ && docker exec -u 0 v2raytunpanel-backend chown -R node:node /app/backups; then
+      success "Panel backups moved to the persistent volume"
+    else
+      warn "Could not move the old panel backups into the volume; they stay in $saved_backups"
+    fi
+  fi
+
+  caddy_enable_log_rotation "$ts"
 
   success "Panel updated to ${VERSION}"
   echo ""
   docker compose ps
+}
+
+# Caddy installed by older installers logs without rotation and its log grows forever. Insert the
+# same limits as the panel services (a targeted edit keeps any local changes to the file) and
+# recreate the container; certificates live in the caddy_data volume and survive it.
+caddy_enable_log_rotation() {
+  local ts="$1" file="$CADDY_DIR/docker-compose.yml"
+  [ -f "$file" ] || return 0
+  grep -q 'max-size' "$file" && return 0
+  if ! grep -q '^    container_name: v2raytunpanel-caddy$' "$file"; then
+    warn "Caddy compose file has an unexpected layout; add log rotation to $file by hand"
+    return 0
+  fi
+  cp "$file" "$file.bak-$ts"
+  awk '{ print } /^    container_name: v2raytunpanel-caddy$/ {
+    print "    logging:"
+    print "      driver: json-file"
+    print "      options:"
+    print "        max-size: \"10m\""
+    print "        max-file: \"3\""
+  }' "$file.bak-$ts" > "$file"
+  if (cd "$CADDY_DIR" && docker compose up -d >/dev/null 2>&1); then
+    success "Caddy logs now rotate (10 MB x 3)"
+  else
+    cp "$file.bak-$ts" "$file"
+    (cd "$CADDY_DIR" && docker compose up -d >/dev/null 2>&1)
+    warn "Could not recreate Caddy with log rotation; the previous compose file was restored"
+  fi
+}
+
+# Polls the backend's readiness endpoint every 2 s, up to the given number of tries.
+wait_backend_ready() {
+  local tries="${1:-90}" i
+  for i in $(seq 1 "$tries"); do
+    curl -sf "http://localhost:3000/api/health/ready" >/dev/null 2>&1 && return 0
+    sleep 2
+  done
+  return 1
+}
+
+# The agent port only has to answer the panel: to anyone else it gives the node away.
+restrict_agent_port() {
+  local port panel_ip="${V2RAYTUN_PANEL_IP:-}"
+  port=$(sed -n 's/.*NODE_PORT=\([0-9][0-9]*\).*/\1/p' docker-compose.yml 2>/dev/null | head -1)
+  [ -n "$port" ] || return 0
+  if ! command -v ufw >/dev/null 2>&1 || ! ufw status 2>/dev/null | grep -q "Status: active"; then
+    warn "Allow the agent port ${port}/tcp to the panel's IP only (firewall on this server or at the provider)."
+    return 0
+  fi
+  if [ -z "$panel_ip" ] && [ -t 0 ]; then
+    read -rp "Panel server IP (the agent port ${port} will answer only it; Enter = skip): " panel_ip
+  fi
+  if [ -z "$panel_ip" ]; then
+    warn "ufw is active: allow the agent port to the panel only: ufw allow from <panel IP> to any port ${port} proto tcp && ufw deny ${port}/tcp"
+    return 0
+  fi
+  if ufw allow from "$panel_ip" to any port "$port" proto tcp >/dev/null && ufw deny "$port"/tcp >/dev/null; then
+    success "Agent port ${port}/tcp answers ${panel_ip} only"
+  else
+    warn "Could not add the ufw rules for the agent port ${port}/tcp"
+  fi
 }
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -412,6 +517,11 @@ services:
     container_name: v2raytunpanel-caddy
     restart: unless-stopped
     network_mode: host
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
@@ -581,9 +691,9 @@ node_install_from_panel() {
 
   if [ $? -eq 0 ]; then
     success "Node started. It should appear as Connected in the panel within ~60 seconds."
+    restrict_agent_port
     echo ""
     echo -e "  Logs: ${YELLOW}cd $NODE_DIR && docker compose logs -f${RESET}"
-    echo -e "  Make sure the connection port is open in your firewall."
   else
     error "Failed to start node"
     return 1
@@ -857,7 +967,7 @@ migrate_from_remna() {
   echo -e "${DIM}Transfers users (with their keys/subscriptions), config profiles, hosts,"
   echo -e "squads, subscription templates and node metadata from a Remnawave panel"
   echo -e "into this panel.${RESET}"
-  echo -e "${DIM}Verified for Remnawave 2.8.0 — newer versions may need a tool update;"
+  echo -e "${DIM}Verified for Remnawave 3.4.4 — other versions may need a tool update;"
   echo -e "field mismatches are reported at the preview step.${RESET}"
   echo ""
 
@@ -934,13 +1044,28 @@ import sys, json
 d = json.load(sys.stdin)
 data = d.get('data', d)
 c = data.get('counts', {})
+skipped = data.get('skipped', {})
+print(f"    {'':24} {'import':>7} {'skip':>7}")
 for k in ['users','configProfiles','hosts','squads','externalSquads','hwidDevices','nodes',
           'subscriptionTemplates','subscriptionPageConfigs','configSnippets']:
-    print(f"    {k:24} {c.get(k,0)}")
-if data.get('usernameConflicts'):
-    print(f"    username conflicts: {len(data['usernameConflicts'])}")
+    print(f"    {k:24} {c.get(k,0):>7} {skipped.get(k,0):>7}")
+for label, key, sample in [('username conflicts', 'usernameConflictCount', 'usernameConflicts'),
+                           ('short UUID conflicts', 'shortUuidConflictCount', 'shortUuidConflicts')]:
+    n = data.get(key, len(data.get(sample) or []))
+    if n:
+        print(f"    {label}: {n}")
+def names(items, field):
+    shown = [str(i.get(field, '')) for i in items[:10]]
+    more = len(items) - len(shown)
+    return ', '.join(shown) + (f" (+{more})" if more > 0 else '')
 for w in data.get('warnings', []):
     print(f"    [warn] {w.get('message','')}")
+    if w.get('detail'):
+        print(f"           {w['detail']}")
+    if w.get('hostSettings'):
+        print(f"           hosts: {names(w['hostSettings'], 'remark')}")
+    if w.get('nodeLimits'):
+        print(f"           nodes: {names(w['nodeLimits'], 'name')}")
 for b in data.get('blockers', []):
     print(f"    [BLOCK] {b.get('message','')}")
 sys.exit(2 if data.get('blockers') else 0)
@@ -1203,7 +1328,7 @@ menu_main() {
 }
 
 menu_help() {
-  cat << 'HELP'
+  cat << HELP
 v2raytunsetup — V2RayTun Panel Setup Manager
 
 Usage:
@@ -1226,7 +1351,8 @@ Commands:
 
 Environment:
   V2RAYTUN_REGISTRY        Docker registry hostname
-  V2RAYTUN_VERSION         Image tag (default 1.0.10)
+  V2RAYTUN_VERSION         Image tag (default ${VERSION})
+  V2RAYTUN_PANEL_IP        Node install: the panel's IP, the only one the agent port answers (when ufw is active)
 HELP
 }
 
