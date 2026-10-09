@@ -148,8 +148,10 @@ ensure_docker() {
 
 fetch_assets() {
   info "Fetching helper scripts from ${REPO}@${BRANCH}..."
-  rm -rf "$SETUP_DIR"
-  mkdir -p "$SETUP_DIR/lib" "$SETUP_DIR/compose"
+  # Into a new folder swapped in at the end: a failed download leaves the installed scripts as they were.
+  local dest="${SETUP_DIR}.new"
+  rm -rf "$dest"
+  mkdir -p "$dest/lib" "$dest/compose"
 
   local files=(
     "lib/common.sh"
@@ -168,24 +170,27 @@ fetch_assets() {
 
   for f in "${files[@]}"; do
     if [ "$from_local" -eq 1 ] && [ -f "$SCRIPT_DIR/$f" ]; then
-      cp "$SCRIPT_DIR/$f" "${SETUP_DIR}/${f}"
-    elif ! curl -fsSL "${RAW_BASE}/${f}" -o "${SETUP_DIR}/${f}"; then
+      cp "$SCRIPT_DIR/$f" "${dest}/${f}"
+    elif ! curl -fsSL "${RAW_BASE}/${f}" -o "${dest}/${f}"; then
       error "Failed to fetch ${f}"
       echo "URL: ${RAW_BASE}/${f}"
       echo "If this repo is private, clone it with your deploy key and run install.sh from the clone."
+      rm -rf "$dest"
       exit 1
     fi
   done
 
-  chmod +x "$SETUP_DIR/lib/v2raytunsetup.sh"
+  chmod +x "$dest/lib/v2raytunsetup.sh"
 
-  cat > "$SETUP_DIR/.config" << EOF
+  cat > "$dest/.config" << EOF
 RAW_BASE="${RAW_BASE}"
 V2RAYTUN_REGISTRY="${V2RAYTUN_REGISTRY:-$DEFAULT_REGISTRY}"
 V2RAYTUN_VERSION="${V2RAYTUN_VERSION:-$DEFAULT_VERSION}"
 INSTALLER_VERSION="${INSTALLER_VERSION}"
 EOF
 
+  rm -rf "$SETUP_DIR"
+  mv "$dest" "$SETUP_DIR"
   success "Helper scripts cached at ${SETUP_DIR}"
 }
 
